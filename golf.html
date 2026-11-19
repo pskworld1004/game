@@ -1,0 +1,669 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>미니 골프</title>
+<style>
+  :root{--bg:#0f1a14;--panel:#18291f;--text:#eef5ee;--muted:#9fb8a6;--accent:#f4d35e;--good:#7ddc8a;--bad:#ff8a7a}
+  *{box-sizing:border-box}
+  html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font-family:system-ui,"Malgun Gothic","Apple SD Gothic Neo",sans-serif}
+  body{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;padding:12px 16px;gap:10px}
+  .frame{width:min(100%,1100px,calc((100vh - 90px)*1.5))}
+  #hud{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:center;gap:8px;font-size:15px}
+  #hud .stats{display:flex;gap:16px;flex-wrap:wrap}
+  #hud b{color:var(--accent);font-variant-numeric:tabular-nums}
+  #hud button{background:var(--panel);color:var(--text);border:1px solid #2e4a38;border-radius:8px;padding:6px 10px;cursor:pointer;font:inherit}
+  #wrap{position:relative;aspect-ratio:3/2}
+  canvas{width:100%;height:100%;display:block;border-radius:14px;touch-action:none;cursor:crosshair;box-shadow:0 10px 40px rgba(0,0,0,.5)}
+  .overlay{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:rgba(5,12,8,.62);border-radius:14px;backdrop-filter:blur(2px)}
+  .overlay.show{display:flex}
+  .card{background:var(--panel);border:1px solid #2e4a38;border-radius:16px;padding:22px 26px;max-width:92%;max-height:92%;overflow:auto;text-align:center}
+  .card h1{margin:0 0 6px;font-size:clamp(24px,4vw,40px);color:var(--accent)}
+  .card p{margin:6px 0;color:var(--muted);line-height:1.6}
+  .card button{margin-top:14px;background:var(--accent);color:#1b1b1b;border:0;border-radius:10px;padding:10px 22px;font:inherit;font-weight:700;font-size:17px;cursor:pointer}
+  table{border-collapse:collapse;margin:12px auto 0;font-variant-numeric:tabular-nums}
+  th,td{border:1px solid #2e4a38;padding:5px 9px;font-size:14px;min-width:34px}
+  th{color:var(--muted);font-weight:600}
+  td.under{color:var(--good);font-weight:700}
+  td.over{color:var(--bad)}
+  td.cur{background:#24402f}
+</style>
+</head>
+<body>
+  <div id="hud" class="frame">
+    <div class="stats">
+      <span>홀 <b id="hHole">1</b>/<span id="hHoles">6</span></span>
+      <span>파 <b id="hPar">2</b></span>
+      <span>타수 <b id="hStrokes">0</b></span>
+      <span>합계 <b id="hTotal">E</b></span>
+    </div>
+    <button id="muteBtn">🔊 소리</button>
+  </div>
+  <div id="wrap" class="frame">
+    <canvas id="c"></canvas>
+    <div id="ovStart" class="overlay show"><div class="card">
+      <h1>⛳ 미니 골프</h1>
+      <p>공을 클릭하고 <b>뒤로 당기면</b> 골퍼가 백스윙을 하고,<br><b>놓으면</b> 스윙해서 반대 방향으로 칩니다. 당긴 거리만큼 세게 칩니다. (우클릭/Esc로 취소)</p>
+      <p>🟨 모래: 공이 빨리 멈춤 · 🟦 물: 1타 벌타 후 원위치<br>➤ 경사: 화살표 방향으로 공이 흐름 · 🔴 범퍼: 튕겨냄</p>
+      <p>6개 홀 · 파 18</p>
+      <button id="startBtn">시작하기</button>
+    </div></div>
+    <div id="ovHole" class="overlay"><div class="card">
+      <h1 id="holeTitle">버디!</h1>
+      <p id="holeSub"></p>
+      <div id="holeTable"></div>
+      <button id="nextBtn">다음 홀 →</button>
+    </div></div>
+  </div>
+
+<script>
+(() => {
+const W = 900, H = 600, R = 7, CUP_R = 11;
+const MAX_SPEED = 950, MAX_DRAG = 160, MAX_STROKES = 10;
+const GRASS_DECEL = 230, SAND_DECEL = 1000, WALL_E = 0.72, BUMPER_E = 1.15;
+
+const BORDER = [[0,0,900,20],[0,580,900,20],[0,0,20,600],[880,0,20,600]];
+const HOLES = [
+  { par:2, start:[140,310], cup:[760,310],
+    walls:[[20,20,860,160],[20,440,860,140],[430,270,40,80]] },
+  { par:3, start:[120,450], cup:[130,140],
+    walls:[[20,270,640,40]], sand:[[700,40,160,110]], bumpers:[[770,290,24]] },
+  { par:3, start:[110,300], cup:[790,300],
+    water:[[360,20,180,230],[360,350,180,230]], sand:[[680,390,150,120]],
+    bumpers:[[240,190,22],[240,410,22],[620,300,16]] },
+  { par:3, start:[450,530], cup:[450,85],
+    walls:[[20,20,180,560],[700,20,180,560],[400,410,100,30]],
+    slopes:[[200,230,500,140,270,0],[200,120,500,60,-230,0]] },
+  { par:3, start:[110,300], cup:[790,300],
+    walls:[[20,20,860,140],[20,440,860,140]],
+    movers:[{x:330,y:160,w:24,h:110,range:[160,330],spd:1.5,ph:0},
+            {x:560,y:160,w:24,h:110,range:[160,330],spd:2.1,ph:Math.PI}],
+    bumpers:[[450,300,16]] },
+  { par:4, start:[100,520], cup:[800,90],
+    walls:[[250,180,40,400],[520,20,40,400]],
+    water:[[620,250,180,80]], sand:[[330,440,140,120]],
+    bumpers:[[400,250,20],[720,470,22]] },
+];
+const toRect = a => ({x:a[0],y:a[1],w:a[2],h:a[3]});
+
+// ---------- DOM ----------
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const $ = id => document.getElementById(id);
+let dpr = 1;
+function resize(){
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cv.width = W*dpr; cv.height = H*dpr;
+  buildStatic();
+}
+
+// ---------- Audio ----------
+let ac = null, muted = false, lastClick = 0;
+function initAudio(){ if(!ac){ try{ ac = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){} } if(ac && ac.state==='suspended') ac.resume(); }
+function tone(f, dur, type='sine', vol=.2, slide=0, delay=0){
+  if(!ac||muted) return;
+  const t0 = ac.currentTime + delay, o = ac.createOscillator(), g = ac.createGain();
+  o.type = type; o.frequency.setValueAtTime(f, t0);
+  if(slide) o.frequency.exponentialRampToValueAtTime(slide, t0+dur);
+  g.gain.setValueAtTime(vol, t0); g.gain.exponentialRampToValueAtTime(.001, t0+dur);
+  o.connect(g).connect(ac.destination); o.start(t0); o.stop(t0+dur+.02);
+}
+function noise(dur, vol, freq){
+  if(!ac||muted) return;
+  const n = Math.floor(ac.sampleRate*dur), buf = ac.createBuffer(1, n, ac.sampleRate), d = buf.getChannelData(0);
+  for(let i=0;i<n;i++) d[i] = (Math.random()*2-1)*(1-i/n);
+  const s = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
+  s.buffer = buf; f.type='lowpass'; f.frequency.value = freq; g.gain.value = vol;
+  s.connect(f).connect(g).connect(ac.destination); s.start();
+}
+const sfx = {
+  hit(p){ noise(.06, .5*p+.15, 3000); tone(180+120*p, .08, 'triangle', .15); },
+  wall(v){ const now=performance.now(); if(now-lastClick<40) return; lastClick=now; tone(420+Math.random()*80, .05, 'square', Math.min(.12, v/4000)); },
+  bump(){ tone(660, .12, 'sine', .18, 990); },
+  cup(){ tone(1046,.15,'sine',.2); tone(1318,.25,'sine',.2,0,.1); tone(1568,.35,'sine',.18,0,.22); },
+  splash(){ noise(.45, .5, 900); tone(300,.3,'sine',.1,80); },
+};
+
+// ---------- State ----------
+let holeIdx = 0, scores = [], strokes = 0, mode = 'menu', t = 0;
+let ball = {x:0,y:0,vx:0,vy:0,s:1}, lastPos = {x:0,y:0}, slowT = 0;
+let aim = null, toast = null, staticCv = null, sinkT = 0;
+let hole = null;
+let golfer = {ax:0, ay:0, ang:0, phi:0, step:0, walking:false, follow:null};
+let swing = null;
+
+function loadHole(i){
+  holeIdx = i; strokes = 0;
+  const h = HOLES[i];
+  hole = {
+    ...h,
+    walls: [...BORDER, ...(h.walls||[])].map(toRect),
+    sand: (h.sand||[]).map(toRect),
+    water: (h.water||[]).map(toRect),
+    slopes: (h.slopes||[]).map(a => ({...toRect(a), fx:a[4], fy:a[5]})),
+    bumpers: (h.bumpers||[]).map(a => ({x:a[0],y:a[1],r:a[2]})),
+    movers: (h.movers||[]).map(m => ({...m})),
+  };
+  ball = {x:h.start[0], y:h.start[1], vx:0, vy:0, s:1};
+  lastPos = {x:ball.x, y:ball.y};
+  mode = 'ready'; aim = null; swing = null;
+  golfer = {ax:ball.x, ay:ball.y, ang:Math.atan2(h.cup[1]-ball.y, h.cup[0]-ball.x), phi:0, step:0, walking:false, follow:null};
+  buildStatic(); updateHud();
+  showToast(`${i+1}번 홀 · 파 ${h.par}`, 1.8);
+}
+
+function updateHud(){
+  $('hHole').textContent = holeIdx+1; $('hHoles').textContent = HOLES.length;
+  $('hPar').textContent = HOLES[holeIdx].par; $('hStrokes').textContent = strokes;
+  let tot = 0, par = 0;
+  scores.forEach((s,i) => { tot += s; par += HOLES[i].par; });
+  $('hTotal').textContent = fmtRel(tot - par);
+}
+const fmtRel = d => d === 0 ? 'E' : (d > 0 ? '+'+d : ''+d);
+function showToast(text, dur=1.4){ toast = {text, t:0, dur}; }
+
+// ---------- Geometry helpers ----------
+const clamp = (v,a,b) => v<a?a:v>b?b:v;
+const inRect = (x,y,r) => x>=r.x && x<=r.x+r.w && y>=r.y && y<=r.y+r.h;
+function moverRect(m, time){
+  const k = .5 + .5*Math.sin(time*m.spd + m.ph);
+  return {x:m.x, y:m.range[0] + (m.range[1]-m.range[0])*k, w:m.w, h:m.h};
+}
+
+function collideRect(b, r, mvx=0, mvy=0){
+  const cx = clamp(b.x, r.x, r.x+r.w), cy = clamp(b.y, r.y, r.y+r.h);
+  let dx = b.x-cx, dy = b.y-cy, d2 = dx*dx+dy*dy;
+  if(d2 >= R*R) return 0;
+  let nx, ny, pen;
+  if(d2 < 1e-9){
+    const l = b.x-r.x, rr = r.x+r.w-b.x, tt = b.y-r.y, bb = r.y+r.h-b.y, m = Math.min(l,rr,tt,bb);
+    if(m===l){nx=-1;ny=0;} else if(m===rr){nx=1;ny=0;} else if(m===tt){nx=0;ny=-1;} else {nx=0;ny=1;}
+    pen = m + R;
+  } else {
+    const d = Math.sqrt(d2); nx = dx/d; ny = dy/d; pen = R-d;
+  }
+  b.x += nx*pen; b.y += ny*pen;
+  const rvx = b.vx-mvx, rvy = b.vy-mvy, vn = rvx*nx + rvy*ny;
+  if(vn < 0){
+    b.vx = rvx - (1+WALL_E)*vn*nx + mvx;
+    b.vy = rvy - (1+WALL_E)*vn*ny + mvy;
+    return -vn;
+  }
+  return 0.001;
+}
+function collideCircle(b, c){
+  const dx = b.x-c.x, dy = b.y-c.y, d = Math.hypot(dx,dy), min = R + c.r;
+  if(d >= min || d === 0) return 0;
+  const nx = dx/d, ny = dy/d;
+  b.x = c.x + nx*min; b.y = c.y + ny*min;
+  const vn = b.vx*nx + b.vy*ny;
+  if(vn < 0){
+    b.vx -= (1+BUMPER_E)*vn*nx; b.vy -= (1+BUMPER_E)*vn*ny;
+    const sp = Math.hypot(b.vx,b.vy); if(sp < 160){ b.vx = nx*160; b.vy = ny*160; }
+    return -vn;
+  }
+  return 0;
+}
+
+// ---------- Physics ----------
+function physics(dt){
+  const sub = 8, h = dt/sub;
+  for(let i=0;i<sub;i++){
+    const tt = t + h*i;
+    if(mode === 'ready'){
+      // movers can still shove a resting ball
+      for(const m of hole.movers){
+        const r = moverRect(m, tt), r2 = moverRect(m, tt+h);
+        if(collideRect(ball, r, 0, (r2.y-r.y)/h)) mode = 'rolling';
+      }
+      if(mode === 'ready') continue;
+    }
+    if(mode !== 'rolling') return;
+    stepBall(h, tt);
+    if(mode !== 'rolling') return;
+  }
+}
+
+function stepBall(h, tt){
+  const b = ball;
+  let decel = GRASS_DECEL, onSlope = false;
+  for(const s of hole.sand) if(inRect(b.x,b.y,s)) decel = SAND_DECEL;
+  for(const s of hole.slopes) if(inRect(b.x,b.y,s)){ b.vx += s.fx*h; b.vy += s.fy*h; onSlope = true; }
+
+  let sp = Math.hypot(b.vx,b.vy);
+  if(sp > 0){ const ns = Math.max(0, sp - decel*h); b.vx *= ns/sp; b.vy *= ns/sp; sp = ns; }
+
+  // cup pull + sink
+  const cx = hole.cup[0], cy = hole.cup[1], dxc = cx-b.x, dyc = cy-b.y, dc = Math.hypot(dxc,dyc);
+  if(dc < CUP_R+3 && sp < 500 && dc > 0){ b.vx += dxc/dc*900*h; b.vy += dyc/dc*900*h; }
+  if(dc < CUP_R-2 && sp < 430){ mode = 'sinking'; sinkT = 0; sfx.cup(); return; }
+
+  b.x += b.vx*h; b.y += b.vy*h;
+
+  for(const w of hole.walls){ const v = collideRect(b, w); if(v > 30) sfx.wall(v); }
+  for(const m of hole.movers){
+    const r = moverRect(m, tt), r2 = moverRect(m, tt+h);
+    const v = collideRect(b, r, 0, (r2.y-r.y)/h); if(v > 30) sfx.wall(v);
+  }
+  for(const c of hole.bumpers){ if(collideCircle(b, c) > 20) sfx.bump(); }
+
+  for(const wt of hole.water) if(inRect(b.x,b.y,wt)){
+    sfx.splash(); strokes++; updateHud();
+    showToast('풍덩! 1벌타', 1.4);
+    b.x = lastPos.x; b.y = lastPos.y; b.vx = b.vy = 0;
+    finishShot(); return;
+  }
+
+  sp = Math.hypot(b.vx,b.vy);
+  slowT = sp < 10 ? slowT + h : 0;
+  if(sp < 5 && (!onSlope || slowT > .6)){ b.vx = b.vy = 0; finishShot(); }
+}
+
+function finishShot(){
+  mode = 'ready'; slowT = 0;
+  if(strokes >= MAX_STROKES){ mode = 'over'; endHole(true); }
+}
+
+function shoot(px, py){
+  const p = Math.min(1, Math.hypot(px,py)/MAX_DRAG);
+  if(p < .04) return;
+  const a = Math.atan2(py, px);
+  lastPos = {x:ball.x, y:ball.y};
+  ball.vx = Math.cos(a)*MAX_SPEED*p; ball.vy = Math.sin(a)*MAX_SPEED*p;
+  strokes++; updateHud(); sfx.hit(p);
+  mode = 'rolling'; slowT = 0;
+}
+
+// ---------- Hole end ----------
+const NAMES = {'-3':'알바트로스!','-2':'이글!','-1':'버디!','0':'파','1':'보기','2':'더블 보기','3':'트리플 보기'};
+function endHole(maxed){
+  scores[holeIdx] = strokes; updateHud();
+  const par = HOLES[holeIdx].par, d = strokes - par;
+  let title = strokes === 1 ? '홀인원!! 🎉' : (NAMES[d] || fmtRel(d));
+  if(maxed) title = '최대 타수 도달';
+  const last = holeIdx === HOLES.length-1;
+  setTimeout(() => {
+    $('holeTitle').textContent = last ? '라운드 종료' : title;
+    let tot = scores.reduce((a,b)=>a+b,0), parTot = HOLES.reduce((a,h)=>a+h.par,0);
+    if(last){
+      let best = null;
+      try { best = +localStorage.getItem('miniGolfBest') || null; if(!best || tot < best){ localStorage.setItem('miniGolfBest', tot); } } catch(e){}
+      const isBest = !best || tot < best;
+      $('holeSub').innerHTML = `마지막 홀: ${title}<br>총 <b>${tot}타</b> (${fmtRel(tot-parTot)})` +
+        (isBest ? ' · 🏆 최고 기록!' : ` · 최고 기록 ${best}타`);
+      $('nextBtn').textContent = '다시 하기 ↺';
+    } else {
+      $('holeSub').textContent = `${strokes}타 (파 ${par})`;
+      $('nextBtn').textContent = '다음 홀 →';
+    }
+    $('holeTable').innerHTML = scoreTable();
+    $('ovHole').classList.add('show');
+  }, 700);
+}
+function scoreTable(){
+  let h = '<tr><th>홀</th>', p = '<tr><th>파</th>', s = '<tr><th>타수</th>';
+  let tp = 0, ts = 0;
+  HOLES.forEach((ho,i) => {
+    const cur = i === holeIdx ? ' cur' : '';
+    h += `<th>${i+1}</th>`; p += `<td>${ho.par}</td>`; tp += ho.par;
+    if(scores[i] != null){
+      ts += scores[i];
+      const c = scores[i] < ho.par ? 'under' : scores[i] > ho.par ? 'over' : '';
+      s += `<td class="${c}${cur}">${scores[i]}</td>`;
+    } else s += `<td>–</td>`;
+  });
+  return `<table>${h}<th>합</th></tr>${p}<td>${tp}</td></tr>${s}<td>${ts||'–'}</td></tr></table>`;
+}
+$('nextBtn').onclick = () => {
+  $('ovHole').classList.remove('show');
+  if(holeIdx === HOLES.length-1){ scores = []; loadHole(0); }
+  else loadHole(holeIdx+1);
+};
+$('startBtn').onclick = () => { initAudio(); $('ovStart').classList.remove('show'); scores = []; loadHole(0); };
+$('muteBtn').onclick = () => { muted = !muted; $('muteBtn').textContent = muted ? '🔇 음소거' : '🔊 소리'; };
+
+// ---------- Input ----------
+function toWorld(e){
+  const r = cv.getBoundingClientRect();
+  return {x:(e.clientX-r.left)/r.width*W, y:(e.clientY-r.top)/r.height*H};
+}
+cv.addEventListener('pointerdown', e => {
+  if(e.button === 2){ aim = null; return; }
+  if(mode !== 'ready' || golfer.walking) return;
+  initAudio();
+  const p = toWorld(e);
+  aim = {sx:p.x, sy:p.y, cx:p.x, cy:p.y};
+  try { cv.setPointerCapture(e.pointerId); } catch(err) {}
+});
+cv.addEventListener('pointermove', e => { if(aim){ const p = toWorld(e); aim.cx = p.x; aim.cy = p.y; } });
+cv.addEventListener('pointerup', e => {
+  if(!aim) return;
+  const a = aim; aim = null;
+  if(mode !== 'ready') return;
+  const px = a.sx - a.cx, py = a.sy - a.cy;
+  if(Math.hypot(px,py)/MAX_DRAG < .04) return;
+  // start the downswing; the ball launches at impact
+  swing = {px, py, phi0: golfer.phi, t:0, launched:false};
+  golfer.ang = Math.atan2(py, px);
+  mode = 'swing';
+  noise(.16, .18, 1600);
+});
+cv.addEventListener('pointercancel', () => aim = null);
+cv.addEventListener('contextmenu', e => { e.preventDefault(); aim = null; });
+window.addEventListener('keydown', e => { if(e.key === 'Escape') aim = null; });
+
+// ---------- Rendering ----------
+function rr(c, x, y, w, h, r){ c.beginPath(); c.roundRect ? c.roundRect(x,y,w,h,r) : c.rect(x,y,w,h); }
+
+function buildStatic(){
+  if(!hole) return;
+  staticCv = staticCv || document.createElement('canvas');
+  staticCv.width = W*dpr; staticCv.height = H*dpr;
+  const c = staticCv.getContext('2d');
+  c.setTransform(dpr,0,0,dpr,0,0);
+  // fairway stripes
+  for(let x=0; x<W; x+=50){ c.fillStyle = (x/50)%2 ? '#5fb35a' : '#58a853'; c.fillRect(x,0,50,H); }
+  // subtle grass speckle (deterministic)
+  let seed = holeIdx*999+7; const rnd = () => (seed = (seed*16807)%2147483647)/2147483647;
+  c.fillStyle = 'rgba(255,255,255,.05)';
+  for(let i=0;i<900;i++) c.fillRect(rnd()*W, rnd()*H, 1.5, 1.5);
+  // sand
+  for(const s of hole.sand){
+    rr(c, s.x, s.y, s.w, s.h, 26); c.fillStyle = '#e9d59b'; c.fill();
+    c.lineWidth = 3; c.strokeStyle = '#d2b978'; c.stroke();
+    c.fillStyle = 'rgba(160,130,70,.35)';
+    for(let i=0;i<s.w*s.h/120;i++) c.fillRect(s.x+8+rnd()*(s.w-16), s.y+8+rnd()*(s.h-16), 2, 2);
+  }
+  // water base
+  for(const w of hole.water){
+    rr(c, w.x, w.y, w.w, w.h, 14); c.fillStyle = '#2f7fc4'; c.fill();
+    c.lineWidth = 3; c.strokeStyle = '#1f5f99'; c.stroke();
+  }
+  // tee
+  c.fillStyle = 'rgba(255,255,255,.18)';
+  rr(c, hole.start[0]-16, hole.start[1]-16, 32, 32, 6); c.fill();
+  // walls
+  for(const w of hole.walls){
+    c.fillStyle = 'rgba(0,0,0,.25)'; c.fillRect(w.x+3, w.y+4, w.w, w.h);
+  }
+  for(const w of hole.walls){
+    const big = w.w > 60 && w.h > 60;
+    c.fillStyle = big ? '#2f5a33' : '#7b5a3c'; c.fillRect(w.x, w.y, w.w, w.h);
+    if(big){
+      c.save(); c.beginPath(); c.rect(w.x, w.y, w.w, w.h); c.clip();
+      c.fillStyle = 'rgba(0,0,0,.12)';
+      for(let i=0;i<w.w*w.h/400;i++) c.fillRect(w.x+rnd()*w.w, w.y+rnd()*w.h, 2, 4);
+      c.restore();
+    }
+  }
+  for(const w of hole.walls){
+    const big = w.w > 60 && w.h > 60;
+    c.strokeStyle = '#a07a52'; c.lineWidth = big ? 6 : 2;
+    big ? c.strokeRect(w.x+3, w.y+3, w.w-6, w.h-6) : c.strokeRect(w.x+1, w.y+1, w.w-2, w.h-2);
+  }
+  // bumpers
+  for(const b of hole.bumpers){
+    c.fillStyle = 'rgba(0,0,0,.25)'; c.beginPath(); c.arc(b.x+3, b.y+4, b.r, 0, 7); c.fill();
+    c.fillStyle = '#d9463b'; c.beginPath(); c.arc(b.x, b.y, b.r, 0, 7); c.fill();
+    c.strokeStyle = '#fff'; c.lineWidth = 3; c.beginPath(); c.arc(b.x, b.y, b.r-5, 0, 7); c.stroke();
+    c.fillStyle = 'rgba(255,255,255,.35)'; c.beginPath(); c.arc(b.x-b.r*.35, b.y-b.r*.35, b.r*.25, 0, 7); c.fill();
+  }
+}
+
+function drawDynamic(){
+  // water waves
+  ctx.strokeStyle = 'rgba(255,255,255,.35)'; ctx.lineWidth = 2;
+  for(const w of hole.water){
+    ctx.save(); rr(ctx, w.x, w.y, w.w, w.h, 14); ctx.clip();
+    for(let y = w.y+12; y < w.y+w.h; y += 22){
+      ctx.beginPath();
+      for(let x = w.x; x <= w.x+w.w; x += 6){
+        const yy = y + Math.sin(x*.06 + t*2 + y)*3;
+        x === w.x ? ctx.moveTo(x,yy) : ctx.lineTo(x,yy);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+  // slopes
+  for(const s of hole.slopes){
+    ctx.save(); ctx.beginPath(); ctx.rect(s.x, s.y, s.w, s.h); ctx.clip();
+    ctx.fillStyle = 'rgba(30,80,30,.22)'; ctx.fillRect(s.x, s.y, s.w, s.h);
+    const ang = Math.atan2(s.fy, s.fx), mag = Math.hypot(s.fx, s.fy);
+    const off = (t*mag*.15) % 50;
+    ctx.strokeStyle = 'rgba(255,255,255,.28)'; ctx.lineWidth = 3;
+    const cxm = s.x+s.w/2, cym = s.y+s.h/2;
+    ctx.translate(cxm, cym); ctx.rotate(ang);
+    const span = Math.hypot(s.w, s.h);
+    for(let x = -span/2 - 50 + off; x < span/2; x += 50)
+      for(let y = -span/2; y < span/2; y += 40){
+        ctx.beginPath(); ctx.moveTo(x-7, y-9); ctx.lineTo(x+3, y); ctx.lineTo(x-7, y+9); ctx.stroke();
+      }
+    ctx.restore();
+  }
+  // movers
+  for(const m of hole.movers){
+    const r = moverRect(m, t);
+    ctx.fillStyle = 'rgba(0,0,0,.25)'; ctx.fillRect(r.x+3, r.y+4, r.w, r.h);
+    ctx.fillStyle = '#e8a33a'; ctx.fillRect(r.x, r.y, r.w, r.h);
+    ctx.save(); ctx.beginPath(); ctx.rect(r.x, r.y, r.w, r.h); ctx.clip();
+    ctx.fillStyle = '#333';
+    for(let y = r.y-30; y < r.y+r.h; y += 20){ ctx.beginPath(); ctx.moveTo(r.x,y); ctx.lineTo(r.x+r.w,y+12); ctx.lineTo(r.x+r.w,y+22); ctx.lineTo(r.x,y+10); ctx.fill(); }
+    ctx.restore();
+    // rail hint
+    ctx.strokeStyle = 'rgba(0,0,0,.18)'; ctx.lineWidth = 2; ctx.setLineDash([4,6]);
+    ctx.beginPath(); ctx.moveTo(m.x+m.w/2, m.range[0]); ctx.lineTo(m.x+m.w/2, m.range[1]+m.h); ctx.stroke(); ctx.setLineDash([]);
+  }
+  // cup
+  const [cx, cy] = hole.cup;
+  ctx.fillStyle = 'rgba(255,255,255,.25)'; ctx.beginPath(); ctx.arc(cx, cy, CUP_R+4, 0, 7); ctx.fill();
+  ctx.fillStyle = '#152015'; ctx.beginPath(); ctx.arc(cx, cy, CUP_R, 0, 7); ctx.fill();
+  ctx.fillStyle = '#0a100a'; ctx.beginPath(); ctx.arc(cx, cy+2, CUP_R-3, 0, 7); ctx.fill();
+}
+
+function drawBall(){
+  const b = ball;
+  let x = b.x, y = b.y, s = 1;
+  if(mode === 'sinking' || mode === 'sunk'){
+    const k = Math.min(1, sinkT/.35);
+    x = b.x + (hole.cup[0]-b.x)*k; y = b.y + (hole.cup[1]-b.y)*k; s = 1 - k*.6;
+    if(mode === 'sunk') return;
+  }
+  ctx.fillStyle = 'rgba(0,0,0,.3)'; ctx.beginPath(); ctx.ellipse(x+2.5, y+3.5, R*s, R*s*.8, 0, 0, 7); ctx.fill();
+  const g = ctx.createRadialGradient(x-R*.4*s, y-R*.4*s, 1, x, y, R*s);
+  g.addColorStop(0, '#ffffff'); g.addColorStop(1, '#d4d8dc');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, R*s, 0, 7); ctx.fill();
+}
+
+function drawFlag(){
+  const [cx, cy] = hole.cup;
+  const near = Math.hypot(ball.x-cx, ball.y-cy) < 70;
+  ctx.globalAlpha = near ? .35 : 1;
+  ctx.strokeStyle = '#eee'; ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx, cy-52); ctx.stroke();
+  ctx.fillStyle = '#e63946'; ctx.beginPath(); ctx.moveTo(cx, cy-52);
+  const wv = Math.sin(t*4)*3;
+  ctx.quadraticCurveTo(cx+14, cy-48+wv, cx+28, cy-44+wv*.5);
+  ctx.quadraticCurveTo(cx+14, cy-38-wv, cx, cy-34);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+function drawAim(){
+  if(!aim || mode !== 'ready') return;
+  const px = aim.sx-aim.cx, py = aim.sy-aim.cy;
+  const p = Math.min(1, Math.hypot(px,py)/MAX_DRAG);
+  if(p < .04) return;
+  const a = Math.atan2(py, px), len = 30 + p*170;
+  const col = `hsl(${120 - p*120},85%,55%)`;
+  ctx.setLineDash([6,8]); ctx.lineDashOffset = -t*40;
+  ctx.strokeStyle = 'rgba(255,255,255,.75)'; ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.moveTo(ball.x, ball.y); ctx.lineTo(ball.x+Math.cos(a)*len, ball.y+Math.sin(a)*len); ctx.stroke();
+  ctx.setLineDash([]);
+  // arrowhead
+  const ex = ball.x+Math.cos(a)*len, ey = ball.y+Math.sin(a)*len;
+  ctx.fillStyle = col; ctx.beginPath();
+  ctx.moveTo(ex+Math.cos(a)*10, ey+Math.sin(a)*10);
+  ctx.lineTo(ex+Math.cos(a+2.4)*10, ey+Math.sin(a+2.4)*10);
+  ctx.lineTo(ex+Math.cos(a-2.4)*10, ey+Math.sin(a-2.4)*10); ctx.fill();
+  // power ring
+  ctx.strokeStyle = col; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.arc(ball.x, ball.y, R+9, -Math.PI/2, -Math.PI/2 + p*Math.PI*2); ctx.stroke();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 14px system-ui'; ctx.textAlign = 'center';
+  // label on the side opposite the golfer
+  ctx.fillText(Math.round(p*100)+'%', ball.x - Math.sin(a)*30, ball.y + Math.cos(a)*30 + 5);
+}
+
+function drawToast(dt){
+  if(!toast) return;
+  toast.t += dt;
+  if(toast.t > toast.dur){ toast = null; return; }
+  const a = Math.min(1, toast.t*5, (toast.dur-toast.t)*3);
+  ctx.globalAlpha = a;
+  ctx.font = 'bold 28px system-ui, "Malgun Gothic"'; ctx.textAlign = 'center';
+  const w = ctx.measureText(toast.text).width + 36;
+  ctx.fillStyle = 'rgba(10,25,15,.75)'; rr(ctx, W/2-w/2, 34, w, 46, 12); ctx.fill();
+  ctx.fillStyle = '#f4d35e'; ctx.fillText(toast.text, W/2, 67);
+  ctx.globalAlpha = 1;
+}
+
+function render(dt){
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  if(!hole){ ctx.fillStyle = '#3d7a3a'; ctx.fillRect(0,0,W,H); return; }
+  ctx.drawImage(staticCv, 0, 0, W, H);
+  drawDynamic();
+  drawGolfer();
+  drawBall();
+  drawFlag();
+  drawAim();
+  drawToast(dt);
+  if(mode === 'ready' && !aim && !golfer.walking && strokes === 0 && holeIdx === 0){
+    ctx.fillStyle = 'rgba(255,255,255,.8)'; ctx.font = '15px system-ui, "Malgun Gothic"'; ctx.textAlign = 'center';
+    ctx.fillText('드래그해서 뒤로 당긴 뒤 놓으세요', ball.x, ball.y + 34);
+  }
+}
+
+// ---------- Golfer ----------
+const angDiff = (a, b) => { let d = b - a; while(d > Math.PI) d -= Math.PI*2; while(d < -Math.PI) d += Math.PI*2; return d; };
+const DOWNSWING = .11, FOLLOW = .3, BACK_MAX = 2.3, FINISH = -2.1;
+
+function updateGolfer(dt){
+  const g = golfer;
+  if(mode === 'ready'){
+    g.follow = null;
+    // walk to the ball
+    const dx = ball.x-g.ax, dy = ball.y-g.ay, d = Math.hypot(dx,dy);
+    if(d > 1){ const st = Math.min(d, 480*dt); g.ax += dx/d*st; g.ay += dy/d*st; g.step += st; g.walking = true; }
+    else { g.ax = ball.x; g.ay = ball.y; g.walking = false; }
+    const p = aim ? Math.min(1, Math.hypot(aim.sx-aim.cx, aim.sy-aim.cy)/MAX_DRAG) : 0;
+    if(aim && p >= .04){
+      g.ang = Math.atan2(aim.sy-aim.cy, aim.sx-aim.cx);
+      g.phi += (p*BACK_MAX - g.phi) * Math.min(1, dt*25);   // backswing follows the pull
+    } else {
+      const toCup = Math.atan2(hole.cup[1]-ball.y, hole.cup[0]-ball.x);
+      g.ang += angDiff(g.ang, toCup) * Math.min(1, dt*5);
+      g.phi += (0 - g.phi) * Math.min(1, dt*10);
+    }
+  } else if(mode === 'swing' && swing){
+    swing.t += dt;
+    const k = Math.min(1, swing.t/DOWNSWING);
+    g.phi = swing.phi0 * (1 - k*k);
+    if(k >= 1 && !swing.launched){
+      swing.launched = true; g.follow = 0;
+      shoot(swing.px, swing.py);
+    }
+  }
+  if(g.follow !== null){
+    g.follow += dt;
+    const k = Math.min(1, g.follow/FOLLOW);
+    g.phi = FINISH * (1 - (1-k)*(1-k));
+  }
+}
+
+function drawGolfer(){
+  const g = golfer, phi = g.phi;
+  const rot = (x, y, a) => [x*Math.cos(a) - y*Math.sin(a), x*Math.sin(a) + y*Math.cos(a)];
+  const B = [0, -38];                                  // body centre, beside the ball
+  const P = (x, y, a) => { const r = rot(x, y, a); return [B[0]+r[0], B[1]+r[1]]; };
+  const bob = g.walking ? Math.sin(g.step*.18) : 0;
+  ctx.save();
+  ctx.translate(g.ax, g.ay); ctx.rotate(g.ang); ctx.scale(1.25, 1.25);
+
+  // shadow
+  ctx.fillStyle = 'rgba(0,0,0,.22)';
+  ctx.beginPath(); ctx.ellipse(B[0]+5, B[1]+6, 22, 15, 0, 0, 7); ctx.fill();
+  // shoes
+  ctx.fillStyle = '#2a2a2a';
+  ctx.beginPath(); ctx.ellipse(-13, -31 + bob*5, 5, 7.5, 0, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse( 13, -31 - bob*5, 5, 7.5, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(-15, -28 + bob*5, 4, 2); ctx.fillRect(11, -28 - bob*5, 4, 2);
+
+  // shoulders / torso (turns half as much as the arms)
+  ctx.save(); ctx.translate(B[0], B[1]); ctx.rotate(phi*.5);
+  ctx.fillStyle = '#2f6db5';
+  ctx.beginPath(); ctx.ellipse(0, 0, 16, 9.5, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#5b94d6';
+  ctx.beginPath(); ctx.ellipse(0, -2, 11, 5, 0, 0, 7); ctx.fill();
+  ctx.restore();
+
+  const shL = P(-12, 2, phi*.5), shR = P(12, 2, phi*.5);
+  const hands = g.walking ? P(14, 8, 0) : P(-4, 19, phi);
+  const head  = g.walking ? P(16, 34, 0) : P(-11, 38, phi*1.05);
+
+  // club shaft + head
+  ctx.strokeStyle = '#c9ccd1'; ctx.lineWidth = 2.2; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(hands[0], hands[1]); ctx.lineTo(head[0], head[1]); ctx.stroke();
+  ctx.save(); ctx.translate(head[0], head[1]);
+  ctx.rotate(Math.atan2(head[1]-hands[1], head[0]-hands[0]) + Math.PI/2);
+  ctx.fillStyle = '#3a3d42'; ctx.beginPath(); ctx.ellipse(0, 0, 6.5, 3.2, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#9aa0a8'; ctx.fillRect(-5, -1, 10, 1.2);
+  ctx.restore();
+
+  // arms
+  ctx.strokeStyle = '#f0c08e'; ctx.lineWidth = 5;
+  ctx.beginPath(); ctx.moveTo(shL[0], shL[1]); ctx.lineTo(hands[0], hands[1]); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(shR[0], shR[1]); ctx.lineTo(hands[0], hands[1]); ctx.stroke();
+  // short sleeves
+  ctx.fillStyle = '#2f6db5';
+  ctx.beginPath(); ctx.arc(shL[0], shL[1], 4.5, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(shR[0], shR[1], 4.5, 0, 7); ctx.fill();
+  // glove
+  ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(hands[0], hands[1], 4, 0, 7); ctx.fill();
+
+  // head with cap; eyes stay on the ball, so it turns only a little
+  const hp = P(0, -1, phi*.15);
+  ctx.fillStyle = '#5a3b22'; ctx.beginPath(); ctx.arc(hp[0], hp[1], 9, 0, 7); ctx.fill();
+  ctx.save(); ctx.translate(hp[0], hp[1]); ctx.rotate(phi*.15);
+  ctx.fillStyle = '#e63946'; ctx.beginPath(); ctx.arc(0, -1, 8, 0, 7); ctx.fill();
+  ctx.fillStyle = '#b82833'; ctx.beginPath(); ctx.ellipse(0, 7, 7.5, 4.5, 0, 0, Math.PI); ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(0, -1, 1.6, 0, 7); ctx.fill();
+  ctx.restore();
+
+  ctx.restore();
+}
+
+// ---------- Loop ----------
+let prev = performance.now();
+function frame(now){
+  const dt = Math.min(.033, (now-prev)/1000); prev = now;
+  if(hole && mode !== 'menu'){
+    updateGolfer(dt);
+    physics(dt);
+    if(mode === 'sinking'){
+      sinkT += dt;
+      if(sinkT > .35){ mode = 'sunk'; endHole(false); }
+    }
+  }
+  t += dt;
+  render(dt);
+  requestAnimationFrame(frame);
+}
+window.__golf = { loadHole: i => { $('ovStart').classList.remove('show'); loadHole(i); }, get ball(){ return ball; } };
+window.addEventListener('resize', resize);
+resize();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
